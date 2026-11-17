@@ -1,12 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-export type NarrationVoiceId = 'Kore' | 'Charon' | 'Puck';
+export type NarrationVoiceId = 'Kore' | 'Zephyr' | 'Charon' | 'Puck';
+export type NarrationIntonationId = 'cercana' | 'natural' | 'periodistica' | 'pausada';
+export type NarrationPaceId = 'lenta' | 'normal' | 'agil';
 export type AudioEngineMode = 'gemini' | 'browser' | 'loading';
 
 export const NARRATION_VOICES: { id: NarrationVoiceId; label: string }[] = [
   { id: 'Kore', label: 'Sofía (Neural)' },
+  { id: 'Zephyr', label: 'Camila (Neural)' },
   { id: 'Charon', label: 'Martín (Neural)' },
   { id: 'Puck', label: 'Diego (Neural)' },
+];
+
+export const NARRATION_INTONATIONS: { id: NarrationIntonationId; label: string }[] = [
+  { id: 'cercana', label: 'Tono: Cercano' },
+  { id: 'natural', label: 'Tono: Natural' },
+  { id: 'periodistica', label: 'Tono: Informativo' },
+  { id: 'pausada', label: 'Tono: Pausado' },
 ];
 
 // Minimal 1-sample silent PCM WAV to unlock HTMLAudioElement inside user gesture
@@ -49,16 +59,30 @@ function hashScript(text: string): string {
   return `${text.length}_${h >>> 0}`;
 }
 
-function getCacheKey(voice: NarrationVoiceId, slideKey: string, text: string) {
-  return `${voice}::${slideKey}::${hashScript(text)}`;
+function rateToPace(rate: number): NarrationPaceId {
+  if (rate <= 0.96) return 'lenta';
+  if (rate >= 1.06) return 'agil';
+  return 'normal';
+}
+
+function getCacheKey(
+  voice: NarrationVoiceId,
+  slideKey: string,
+  text: string,
+  intonation: NarrationIntonationId,
+  pace: NarrationPaceId
+) {
+  return `${voice}::${intonation}::${pace}::${slideKey}::${hashScript(text)}`;
 }
 
 async function fetchStaticOrNeuralAudioUrl(
   slideKey: string,
   text: string,
-  voiceName: NarrationVoiceId
+  voiceName: NarrationVoiceId,
+  intonation: NarrationIntonationId,
+  pace: NarrationPaceId
 ): Promise<string> {
-  const key = getCacheKey(voiceName, slideKey, text);
+  const key = getCacheKey(voiceName, slideKey, text, intonation, pace);
   const existing = blobUrlCache.get(key);
   if (existing) return existing;
 
@@ -67,7 +91,12 @@ async function fetchStaticOrNeuralAudioUrl(
 
   const promise = (async () => {
     // 1. Try pre-generated static Gemini Neural MP3 only for verified unchanged tracks
-    if (voiceName === 'Kore' && VALID_STATIC_KORE_TRACKS.has(slideKey)) {
+    if (
+      voiceName === 'Kore' &&
+      intonation === 'cercana' &&
+      pace === 'normal' &&
+      VALID_STATIC_KORE_TRACKS.has(slideKey)
+    ) {
       try {
         const staticRes = await fetch(
           `/audio/${voiceName}/${slideKey}.mp3?v=${STATIC_AUDIO_VERSION}`,
@@ -87,29 +116,43 @@ async function fetchStaticOrNeuralAudioUrl(
       }
     }
 
-    // 2. Dynamically synthesize via server-side Gemini 3.8 Neural TTS
-    const res = await fetch('/api/tts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ slideKey, text, voiceName }),
-    });
+    // 2. Dynamically synthesize via server-side Gemini 3.8 Neural TTS (with 1 retry on transient error)
+    let res: Response | null = null;
+    let apiContentType = '';
+    let lastErrMsg = 'Servicio de voz no disponible.';
 
-    const apiContentType = res.headers.get('content-type')?.toLowerCase() ?? '';
-    if (!res.ok) {
-      let msg = `Servicio de voz no disponible (${res.status})`;
-      if (apiContentType.includes('application/json')) {
-        try {
-          const errJson = (await res.json()) as { error?: string };
-          if (errJson?.error) msg = errJson.error;
-        } catch {
-          // Ignore JSON parse errors
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        res = await fetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ slideKey, text, voiceName, intonation, pace }),
+        });
+        apiContentType = res.headers.get('content-type')?.toLowerCase() ?? '';
+        if (res.ok && apiContentType.includes('audio')) {
+          break;
         }
+        lastErrMsg = `Servicio de voz no disponible (${res.status})`;
+        if (apiContentType.includes('application/json')) {
+          try {
+            const errJson = (await res.json()) as { error?: string };
+            if (errJson?.error) lastErrMsg = errJson.error;
+          } catch {
+            // Ignore JSON parse errors
+          }
+        }
+        if (res.status === 400 || res.status === 401 || res.status === 403 || res.status === 503) {
+          throw new Error(lastErrMsg);
+        }
+      } catch (err) {
+        lastErrMsg = err instanceof Error ? err.message : lastErrMsg;
+        if (attempt === 1) throw new Error(lastErrMsg);
       }
-      throw new Error(msg);
+      await new Promise((r) => setTimeout(r, 650));
     }
 
-    if (!apiContentType.includes('audio')) {
-      throw new Error('El servidor no devolvió un formato de audio válido.');
+    if (!res || !res.ok || !apiContentType.includes('audio')) {
+      throw new Error(lastErrMsg);
     }
 
     const wavBlob = await res.blob();
@@ -187,16 +230,20 @@ export function useSlideNarration({
     typeof window !== 'undefined' && 'speechSynthesis' in window;
 
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
   const [isLoadingAudio, setIsLoadingAudio] = useState(false);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const [autoNarrate, setAutoNarrate] = useState(false);
   const [rate, setRate] = useState<number>(1.0);
   const [voice, setVoice] = useState<NarrationVoiceId>('Kore');
+  const [intonation, setIntonation] = useState<NarrationIntonationId>('cercana');
   const [showCaption, setShowCaption] = useState(false);
   const [engineMode, setEngineMode] = useState<AudioEngineMode>('gemini');
   const [errorNotice, setErrorNotice] = useState<string | null>(null);
   const [browserVoices, setBrowserVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [progress, setProgress] = useState<number>(0);
+  const [currentTime, setCurrentTime] = useState<number>(0);
+  const [duration, setDuration] = useState<number>(0);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const unlockAudioElRef = useRef<HTMLAudioElement | null>(null);
@@ -207,13 +254,34 @@ export function useSlideNarration({
   const activeUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const fallbackStartTimerRef = useRef<number | null>(null);
   const activeSessionRef = useRef<number>(0);
+  const pausedSlideKeyRef = useRef<string | null>(null);
+  const pausedMetaRef = useRef<{
+    voice: NarrationVoiceId;
+    intonation: NarrationIntonationId;
+    rate: number;
+    engine: AudioEngineMode;
+    chunkIdx: number;
+  } | null>(null);
   const onNarrationEndRef = useRef(onNarrationEnd);
   const voiceRef = useRef<NarrationVoiceId>(voice);
   const rateRef = useRef<number>(rate);
+  const intonationRef = useRef<NarrationIntonationId>(intonation);
 
   useEffect(() => {
     onNarrationEndRef.current = onNarrationEnd;
   }, [onNarrationEnd]);
+
+  useEffect(() => {
+    voiceRef.current = voice;
+  }, [voice]);
+
+  useEffect(() => {
+    rateRef.current = rate;
+  }, [rate]);
+
+  useEffect(() => {
+    intonationRef.current = intonation;
+  }, [intonation]);
 
   useEffect(() => {
     voiceRef.current = voice;
@@ -306,6 +374,8 @@ export function useSlideNarration({
     clearProgressInterval();
     clearFallbackStartTimer();
     activeUtteranceRef.current = null;
+    pausedSlideKeyRef.current = null;
+    pausedMetaRef.current = null;
 
     const audio = audioRef.current;
     if (audio) {
@@ -326,14 +396,18 @@ export function useSlideNarration({
 
     setIsLoadingAudio(false);
     setIsSpeaking(false);
+    setIsPaused(false);
     setProgress(0);
+    setCurrentTime(0);
+    setDuration(0);
   }, [browserTtsSupported, clearFallbackStartTimer, clearProgressInterval, clearWatchdog]);
 
   const speakWithBrowserFallback = useCallback(
-    (sessionId: number, textToSpeak: string, playbackRate: number) => {
+    (sessionId: number, textToSpeak: string, playbackRate: number, startChunkIdx = 0) => {
       if (!browserTtsSupported || !textToSpeak || activeSessionRef.current !== sessionId) {
         if (activeSessionRef.current === sessionId) {
           setIsSpeaking(false);
+          setIsPaused(false);
           onNarrationEndRef.current?.();
         }
         return;
@@ -341,14 +415,20 @@ export function useSlideNarration({
 
       setEngineMode('browser');
       setIsSpeaking(true);
+      setIsPaused(false);
       setShowCaption(true);
 
       const chunks = splitIntoShortSentences(textToSpeak, 130);
       const liveVoices = window.speechSynthesis.getVoices();
       const best = pickBestSpanishBrowserVoice(liveVoices.length ? liveVoices : browserVoices);
-      let chunkIdx = 0;
+      let chunkIdx = Math.max(0, Math.min(chunks.length - 1, startChunkIdx));
       let chunkStartedAt = performance.now();
       let chunkEstMs = 4000;
+      const totalEstSec = Math.max(
+        4,
+        Math.round((textToSpeak.length / 13) / Math.max(0.75, playbackRate))
+      );
+      setDuration(totalEstSec);
 
       clearProgressInterval();
       progressIntervalRef.current = window.setInterval(() => {
@@ -357,6 +437,10 @@ export function useSlideNarration({
         const intraChunk = Math.min(0.95, elapsed / Math.max(1000, chunkEstMs));
         const pct = Math.min(1, (chunkIdx + intraChunk) / Math.max(1, chunks.length));
         setProgress(pct);
+        setCurrentTime(pct * totalEstSec);
+        if (pausedMetaRef.current) {
+          pausedMetaRef.current.chunkIdx = chunkIdx;
+        }
       }, 140);
 
       const finishChunk = () => {
@@ -369,7 +453,11 @@ export function useSlideNarration({
         } else {
           clearProgressInterval();
           setProgress(1);
+          setCurrentTime(totalEstSec);
           setIsSpeaking(false);
+          setIsPaused(false);
+          pausedSlideKeyRef.current = null;
+          pausedMetaRef.current = null;
           onNarrationEndRef.current?.();
         }
       };
@@ -380,8 +468,8 @@ export function useSlideNarration({
         const utterance = new SpeechSynthesisUtterance(chunkText);
         utterance.lang = best?.lang || 'es-CL';
         if (best) utterance.voice = best;
-        utterance.rate = playbackRate;
-        utterance.pitch = 1.0;
+        utterance.rate = Math.max(0.88, Math.min(1.06, playbackRate * 0.96));
+        utterance.pitch = 1.04;
 
         // Keep strong ref to avoid GC dropping onend in Chrome/Safari mobile
         activeUtteranceRef.current = utterance;
@@ -424,7 +512,11 @@ export function useSlideNarration({
   );
 
   const speakCurrent = useCallback(
-    async (customRate?: number, customVoice?: NarrationVoiceId) => {
+    async (
+      customRate?: number,
+      customVoice?: NarrationVoiceId,
+      customIntonation?: NarrationIntonationId
+    ) => {
       if (!script) return;
 
       unlockAudio();
@@ -432,12 +524,14 @@ export function useSlideNarration({
       const sessionId = activeSessionRef.current;
       const targetVoice = customVoice ?? voiceRef.current;
       const targetRate = customRate ?? rateRef.current;
+      const targetIntonation = customIntonation ?? intonationRef.current;
+      const targetPace = rateToPace(targetRate);
 
       setErrorNotice(null);
       setAutoplayBlocked(false);
       setShowCaption(true);
 
-      const cacheKey = getCacheKey(targetVoice, slideKey, script);
+      const cacheKey = getCacheKey(targetVoice, slideKey, script, targetIntonation, targetPace);
       const isCached = blobUrlCache.has(cacheKey);
       if (!isCached) {
         setIsLoadingAudio(true);
@@ -448,12 +542,28 @@ export function useSlideNarration({
         if (unlockPromiseRef.current) {
           await unlockPromiseRef.current;
         }
-        const audioUrl = await fetchStaticOrNeuralAudioUrl(slideKey, script, targetVoice);
+        const audioUrl = await fetchStaticOrNeuralAudioUrl(
+          slideKey,
+          script,
+          targetVoice,
+          targetIntonation,
+          targetPace
+        );
         if (activeSessionRef.current !== sessionId) return;
 
-        // Pre-fetch next slide/chapter silently in background
+        // Pre-fetch next slide/chapter gently after current track begins playing
         if (nextSlideKey && nextScript) {
-          fetchStaticOrNeuralAudioUrl(nextSlideKey, nextScript, targetVoice).catch(() => {});
+          window.setTimeout(() => {
+            if (activeSessionRef.current === sessionId) {
+              fetchStaticOrNeuralAudioUrl(
+                nextSlideKey,
+                nextScript,
+                targetVoice,
+                targetIntonation,
+                targetPace
+              ).catch(() => {});
+            }
+          }, 1500);
         }
 
         const audio = audioRef.current;
@@ -462,12 +572,28 @@ export function useSlideNarration({
         setIsLoadingAudio(false);
         setEngineMode('gemini');
 
+        const isStaticTrack =
+          targetVoice === 'Kore' &&
+          targetIntonation === 'cercana' &&
+          targetPace === 'normal' &&
+          VALID_STATIC_KORE_TRACKS.has(slideKey);
+        const effectivePlaybackRate = isStaticTrack ? targetRate : 1.0;
+
         const finishAudio = () => {
           if (activeSessionRef.current === sessionId) {
             clearWatchdog();
             clearProgressInterval();
+            const finalDur =
+              Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0;
             setProgress(1);
+            if (finalDur > 0) {
+              setDuration(finalDur);
+              setCurrentTime(finalDur);
+            }
             setIsSpeaking(false);
+            setIsPaused(false);
+            pausedSlideKeyRef.current = null;
+            pausedMetaRef.current = null;
             onNarrationEndRef.current?.();
           }
         };
@@ -476,9 +602,13 @@ export function useSlideNarration({
           if (activeSessionRef.current !== sessionId) return;
           clearWatchdog();
           const hasDur = Number.isFinite(audio.duration) && audio.duration > 0;
-          const safeMs = hasDur
-            ? Math.round(((audio.duration / targetRate) + 4) * 1000)
-            : Math.max(22000, Math.round((script.length / 11) * 1000 / targetRate) + 8000);
+          if (hasDur) {
+            setDuration(audio.duration);
+          }
+          const remainingSec = hasDur
+            ? Math.max(0.5, audio.duration - (audio.currentTime || 0))
+            : Math.max(18, Math.round((script.length / 11) / targetRate) + 4);
+          const safeMs = Math.round(((remainingSec / effectivePlaybackRate) + 4) * 1000);
           watchdogRef.current = window.setTimeout(finishAudio, safeMs);
         };
 
@@ -497,15 +627,29 @@ export function useSlideNarration({
 
         audio.volume = 1;
         audio.src = audioUrl;
-        audio.playbackRate = targetRate;
+        audio.playbackRate = effectivePlaybackRate;
         audio.load();
         armDurationWatchdog();
 
         clearProgressInterval();
         setProgress(0);
+        setCurrentTime(0);
+        setDuration(0);
+        setIsPaused(false);
+        pausedSlideKeyRef.current = slideKey;
+        pausedMetaRef.current = {
+          voice: targetVoice,
+          intonation: targetIntonation,
+          rate: targetRate,
+          engine: 'gemini',
+          chunkIdx: 0,
+        };
+
         progressIntervalRef.current = window.setInterval(() => {
           if (activeSessionRef.current !== sessionId) return;
           if (Number.isFinite(audio.duration) && audio.duration > 0) {
+            setDuration(audio.duration);
+            setCurrentTime(audio.currentTime);
             setProgress(Math.min(1, Math.max(0, audio.currentTime / audio.duration)));
           }
         }, 120);
@@ -513,7 +657,7 @@ export function useSlideNarration({
         setIsSpeaking(true);
         await audio.play();
         if (activeSessionRef.current !== sessionId) return;
-        audio.playbackRate = targetRate;
+        audio.playbackRate = effectivePlaybackRate;
         armDurationWatchdog();
         unlockedRef.current = true;
       } catch (err) {
@@ -541,14 +685,165 @@ export function useSlideNarration({
     [clearProgressInterval, clearWatchdog, nextScript, nextSlideKey, script, slideKey, speakWithBrowserFallback, stop, unlockAudio]
   );
 
+  const pause = useCallback(() => {
+    if (!isSpeaking) return;
+    clearWatchdog();
+    clearProgressInterval();
+    clearFallbackStartTimer();
+
+    const audio = audioRef.current;
+    if (engineMode === 'gemini' && audio && audio.src) {
+      audio.pause();
+      if (Number.isFinite(audio.duration) && audio.duration > 0) {
+        setDuration(audio.duration);
+        setCurrentTime(audio.currentTime);
+        setProgress(Math.min(1, Math.max(0, audio.currentTime / audio.duration)));
+      }
+      pausedSlideKeyRef.current = slideKey;
+      pausedMetaRef.current = {
+        voice: voiceRef.current,
+        intonation: intonationRef.current,
+        rate: rateRef.current,
+        engine: 'gemini',
+        chunkIdx: 0,
+      };
+    } else if (browserTtsSupported) {
+      activeSessionRef.current += 1;
+      window.speechSynthesis.cancel();
+      pausedSlideKeyRef.current = slideKey;
+      if (!pausedMetaRef.current) {
+        pausedMetaRef.current = {
+          voice: voiceRef.current,
+          intonation: intonationRef.current,
+          rate: rateRef.current,
+          engine: 'browser',
+          chunkIdx: 0,
+        };
+      } else {
+        pausedMetaRef.current.engine = 'browser';
+      }
+    }
+
+    setIsSpeaking(false);
+    setIsPaused(true);
+  }, [browserTtsSupported, clearFallbackStartTimer, clearProgressInterval, clearWatchdog, engineMode, isSpeaking, slideKey]);
+
+  const resume = useCallback(async () => {
+    unlockAudio();
+    const audio = audioRef.current;
+    const meta = pausedMetaRef.current;
+    const canResumeGemini =
+      isPaused &&
+      pausedSlideKeyRef.current === slideKey &&
+      meta?.engine === 'gemini' &&
+      meta.voice === voiceRef.current &&
+      meta.intonation === intonationRef.current &&
+      audio &&
+      Boolean(audio.src);
+
+    if (canResumeGemini && audio) {
+      const sessionId = activeSessionRef.current;
+      const isStaticTrack =
+        voiceRef.current === 'Kore' &&
+        intonationRef.current === 'cercana' &&
+        rateToPace(rateRef.current) === 'normal' &&
+        VALID_STATIC_KORE_TRACKS.has(slideKey);
+      const effectivePlaybackRate = isStaticTrack ? rateRef.current : 1.0;
+
+      setIsPaused(false);
+      setIsSpeaking(true);
+      setShowCaption(true);
+      audio.playbackRate = effectivePlaybackRate;
+
+      clearProgressInterval();
+      progressIntervalRef.current = window.setInterval(() => {
+        if (activeSessionRef.current !== sessionId) return;
+        if (Number.isFinite(audio.duration) && audio.duration > 0) {
+          setDuration(audio.duration);
+          setCurrentTime(audio.currentTime);
+          setProgress(Math.min(1, Math.max(0, audio.currentTime / audio.duration)));
+        }
+      }, 120);
+
+      clearWatchdog();
+      if (Number.isFinite(audio.duration) && audio.duration > 0) {
+        const remainingSec = Math.max(0.5, audio.duration - audio.currentTime);
+        watchdogRef.current = window.setTimeout(() => {
+          if (activeSessionRef.current === sessionId) {
+            clearWatchdog();
+            clearProgressInterval();
+            setProgress(1);
+            setCurrentTime(audio.duration);
+            setIsSpeaking(false);
+            setIsPaused(false);
+            pausedSlideKeyRef.current = null;
+            pausedMetaRef.current = null;
+            onNarrationEndRef.current?.();
+          }
+        }, Math.round(((remainingSec / effectivePlaybackRate) + 4) * 1000));
+      }
+
+      try {
+        await audio.play();
+      } catch (err) {
+        if (activeSessionRef.current !== sessionId) return;
+        const errName = (err as { name?: string })?.name || '';
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (errName === 'NotAllowedError' || /not allowed|user didn't interact/i.test(errMsg)) {
+          setIsSpeaking(false);
+          setIsPaused(true);
+          setAutoplayBlocked(true);
+        }
+      }
+      return;
+    }
+
+    if (isPaused && pausedSlideKeyRef.current === slideKey && meta?.engine === 'browser') {
+      const sessionId = ++activeSessionRef.current;
+      speakWithBrowserFallback(sessionId, script, rateRef.current, meta.chunkIdx);
+      return;
+    }
+
+    await speakCurrent();
+  }, [clearProgressInterval, clearWatchdog, isPaused, script, slideKey, speakCurrent, speakWithBrowserFallback, unlockAudio]);
+
+  const seekTo = useCallback(
+    (fraction: number) => {
+      const clamped = Math.min(0.995, Math.max(0, fraction));
+      const audio = audioRef.current;
+      if (
+        engineMode === 'gemini' &&
+        audio &&
+        audio.src &&
+        Number.isFinite(audio.duration) &&
+        audio.duration > 0
+      ) {
+        const nextTime = clamped * audio.duration;
+        try {
+          audio.currentTime = nextTime;
+        } catch {
+          // Ignore seek errors
+        }
+        setCurrentTime(nextTime);
+        setDuration(audio.duration);
+        setProgress(clamped);
+      }
+    },
+    [engineMode]
+  );
+
   const togglePlay = useCallback(() => {
     unlockAudio();
-    if (isSpeaking || isLoadingAudio) {
+    if (isLoadingAudio) {
       stop();
+    } else if (isSpeaking) {
+      pause();
+    } else if (isPaused) {
+      void resume();
     } else {
       void speakCurrent();
     }
-  }, [isLoadingAudio, isSpeaking, speakCurrent, stop, unlockAudio]);
+  }, [isLoadingAudio, isPaused, isSpeaking, pause, resume, speakCurrent, stop, unlockAudio]);
 
   const setAutoNarrateWithUnlock = useCallback(
     (value: boolean) => {
@@ -578,16 +873,20 @@ export function useSlideNarration({
 
   const cycleRate = useCallback(() => {
     unlockAudio();
-    const next = rate === 1.0 ? 1.12 : rate === 1.12 ? 0.94 : 1.0;
+    const next = rate === 1.0 ? 0.94 : rate === 0.94 ? 1.12 : 1.0;
     setRate(next);
     rateRef.current = next;
+    const isStaticTrack =
+      voiceRef.current === 'Kore' &&
+      intonationRef.current === 'cercana' &&
+      VALID_STATIC_KORE_TRACKS.has(slideKey);
     const audio = audioRef.current;
-    if (audio && isSpeaking && engineMode === 'gemini') {
+    if (audio && isSpeaking && engineMode === 'gemini' && isStaticTrack) {
       audio.playbackRate = next;
-    } else if (isSpeaking) {
+    } else if (isSpeaking || isLoadingAudio) {
       void speakCurrent(next);
     }
-  }, [engineMode, isSpeaking, rate, speakCurrent, unlockAudio]);
+  }, [engineMode, isLoadingAudio, isSpeaking, rate, slideKey, speakCurrent, unlockAudio]);
 
   const cycleVoice = useCallback(() => {
     unlockAudio();
@@ -600,9 +899,21 @@ export function useSlideNarration({
     }
   }, [autoNarrate, isLoadingAudio, isSpeaking, speakCurrent, unlockAudio, voice]);
 
+  const cycleIntonation = useCallback(() => {
+    unlockAudio();
+    const idx = NARRATION_INTONATIONS.findIndex((t) => t.id === intonation);
+    const nextIntonation = NARRATION_INTONATIONS[(idx + 1) % NARRATION_INTONATIONS.length].id;
+    setIntonation(nextIntonation);
+    intonationRef.current = nextIntonation;
+    if (isSpeaking || isLoadingAudio || autoNarrate) {
+      void speakCurrent(undefined, undefined, nextIntonation);
+    }
+  }, [autoNarrate, intonation, isLoadingAudio, isSpeaking, speakCurrent, unlockAudio]);
+
   return {
     isSupported: true,
     isSpeaking,
+    isPaused,
     isLoadingAudio,
     autoplayBlocked,
     autoNarrate,
@@ -612,13 +923,22 @@ export function useSlideNarration({
     voice,
     voiceLabel: NARRATION_VOICES.find((v) => v.id === voice)?.label ?? 'Sofía (Neural)',
     cycleVoice,
+    intonation,
+    intonationLabel:
+      NARRATION_INTONATIONS.find((t) => t.id === intonation)?.label ?? 'Tono: Cercano',
+    cycleIntonation,
     engineMode,
     errorNotice,
     progress,
+    currentTime,
+    duration,
+    seekTo,
     showCaption,
     setShowCaption,
     unlockAudio,
     togglePlay,
+    pause,
+    resume,
     speakCurrent,
     stop,
     activeScript: script,

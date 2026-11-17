@@ -62,6 +62,14 @@ import {
 
 type ReportType = 'ecosistema' | 'benchmark' | 'edicion3';
 
+function formatTrackTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '0:00';
+  const total = Math.floor(seconds);
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${mins}:${String(secs).padStart(2, '0')}`;
+}
+
 function resolveInitialReportState(): {
   report: ReportType;
   ecoSlide: number;
@@ -157,6 +165,10 @@ export default function App() {
   const [resetCameraNonce, setResetCameraNonce] = useState<number>(0);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [teleprompterMinimized, setTeleprompterMinimized] = useState<boolean>(false);
+  const [pausedBarHover, setPausedBarHover] = useState<{
+    ratio: number;
+    timeSec: number;
+  } | null>(null);
 
   // Static export & share modal state
   const [exportOpen, setExportOpen] = useState<boolean>(false);
@@ -327,6 +339,12 @@ export default function App() {
   }, [activeCue]);
 
   useEffect(() => () => clearAutoAdvanceTimer(), [clearAutoAdvanceTimer]);
+
+  useEffect(() => {
+    if (!narration.isPaused) {
+      setPausedBarHover(null);
+    }
+  }, [narration.isPaused]);
 
   // Synchronize URL query parameters cleanly for reporte.vecinoslaserena.cl
   useEffect(() => {
@@ -1279,7 +1297,9 @@ export default function App() {
               {narration.isLoadingAudio ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : narration.isSpeaking ? (
-                <Square className="h-3 w-3 fill-current" />
+                <Pause className="h-3.5 w-3.5" />
+              ) : narration.isPaused ? (
+                <Play className="h-3.5 w-3.5" />
               ) : (
                 <Volume2 className="h-3.5 w-3.5" />
               )}
@@ -1288,7 +1308,9 @@ export default function App() {
                   ? 'Preparando...'
                   : narration.isSpeaking
                     ? 'Pausar Audio'
-                    : 'Narrar'}
+                    : narration.isPaused
+                      ? 'Reanudar'
+                      : 'Narrar'}
               </span>
             </button>
           )}
@@ -1350,7 +1372,11 @@ export default function App() {
         (teleprompterMinimized ? (
           <div
             data-html2canvas-ignore="true"
-            className="fixed bottom-[4.25rem] right-3 z-30 max-w-[calc(100vw-1.5rem)] sm:bottom-16 sm:right-6"
+            className={`fixed right-3 z-30 max-w-[calc(100vw-1.5rem)] sm:right-6 ${
+              narration.isPaused
+                ? 'bottom-[9.25rem] sm:bottom-[9rem] lg:bottom-[5.5rem]'
+                : 'bottom-[4.25rem] sm:bottom-16'
+            }`}
           >
             <div
               className={`flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs shadow-xl ${
@@ -1479,6 +1505,10 @@ export default function App() {
                       <>
                         <Pause className="h-3 w-3" /> Pausar
                       </>
+                    ) : narration.isPaused ? (
+                      <>
+                        <Play className="h-3 w-3" /> Reanudar
+                      </>
                     ) : (
                       <>
                         <Play className="h-3 w-3" /> Reproducir
@@ -1502,6 +1532,21 @@ export default function App() {
                       : narration.voiceLabel}
                   </button>
 
+                  {narration.engineMode !== 'browser' && (
+                    <button
+                      type="button"
+                      onClick={narration.cycleIntonation}
+                      title="Ajustar entonación y expresividad neural"
+                      className={`h-6 rounded-md px-2 text-[11px] font-semibold transition-colors ${
+                        isDarkTheme
+                          ? 'bg-[#F59E0B]/18 text-[#F59E0B] hover:bg-[#F59E0B]/28'
+                          : 'bg-sky-50 text-[#0284C7] hover:bg-sky-100'
+                      }`}
+                    >
+                      {narration.intonationLabel}
+                    </button>
+                  )}
+
                   <button
                     type="button"
                     onClick={() => narration.setAutoNarrate(!narration.autoNarrate)}
@@ -1519,6 +1564,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={narration.cycleRate}
+                    title="Ajustar velocidad de locución"
                     className={`font-mono-tabular h-6 rounded-md px-2 text-[11px] font-semibold ${
                       isDarkTheme
                         ? 'bg-white/10 text-[#00F0FF] hover:bg-white/20'
@@ -1642,6 +1688,151 @@ export default function App() {
             </div>
           </div>
         ))}
+
+      {/* Persistent Bottom-Right Track Progress Bar when Narration is Paused */}
+      {!isEdicion3Locked && narration.isPaused && (
+        <aside
+          data-html2canvas-ignore="true"
+          aria-label="Posición de narración en pausa"
+          className={`fixed right-3 z-30 w-60 rounded-xl px-3 py-2 text-xs shadow-xl transition-all sm:right-5 sm:w-64 ${
+            narration.showCaption && !teleprompterMinimized
+              ? 'bottom-[10.5rem] sm:bottom-[10.25rem] lg:bottom-4'
+              : 'bottom-[4.25rem] lg:bottom-4'
+          } ${isDarkTheme ? 'dark-glass-panel text-slate-200' : 'glass-panel text-slate-700'}`}
+        >
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <span
+                className={`inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full ${
+                  isEdicion3
+                    ? 'bg-[#F59E0B]/20 text-[#F59E0B]'
+                    : isBenchmark
+                      ? 'bg-[#00F0FF]/20 text-[#00F0FF]'
+                      : 'bg-[#0284C7]/15 text-[#0284C7]'
+                }`}
+              >
+                <Pause className="h-2.5 w-2.5" />
+              </span>
+              <span className="truncate text-[11px] font-semibold">
+                {isBenchmark ? 'Cap.' : 'Lám.'} {String(currentIdx + 1).padStart(2, '0')} · Pausado
+              </span>
+            </div>
+
+            <div className="flex shrink-0 items-center gap-1">
+              <span
+                className={`font-mono-tabular text-[11px] font-semibold ${
+                  isDarkTheme ? 'text-slate-300' : 'text-slate-600'
+                }`}
+              >
+                {formatTrackTime(narration.currentTime)} /{' '}
+                {narration.duration > 0 ? formatTrackTime(narration.duration) : '--:--'}
+              </span>
+              <button
+                type="button"
+                onClick={() => void narration.resume()}
+                title="Reanudar narración desde este punto"
+                aria-label="Reanudar narración"
+                className={`ml-0.5 inline-flex h-5 w-5 items-center justify-center rounded-md transition-colors ${
+                  isEdicion3
+                    ? 'bg-[#F59E0B] text-[#060B19] hover:bg-amber-400'
+                    : isBenchmark
+                      ? 'bg-[#00F0FF] text-[#060B19] hover:bg-cyan-300'
+                      : 'bg-[#0284C7] text-white hover:bg-sky-700'
+                }`}
+              >
+                <Play className="h-2.5 w-2.5 fill-current" />
+              </button>
+              <button
+                type="button"
+                onClick={narration.stop}
+                title="Detener y reiniciar pista"
+                aria-label="Detener pista"
+                className={`inline-flex h-5 w-5 items-center justify-center rounded-md transition-colors ${
+                  isDarkTheme
+                    ? 'text-slate-400 hover:bg-white/10 hover:text-white'
+                    : 'text-slate-500 hover:bg-slate-900/10 hover:text-[#0F172A]'
+                }`}
+              >
+                <Square className="h-2.5 w-2.5" />
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-1.5 flex items-center gap-2">
+            <div
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(narration.progress * 100)}
+              onMouseMove={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                if (rect.width > 0) {
+                  const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+                  setPausedBarHover({
+                    ratio,
+                    timeSec: narration.duration > 0 ? ratio * narration.duration : 0,
+                  });
+                }
+              }}
+              onMouseLeave={() => setPausedBarHover(null)}
+              onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                if (rect.width > 0) {
+                  narration.seekTo((e.clientX - rect.left) / rect.width);
+                }
+              }}
+              className="relative flex flex-1 cursor-pointer items-center py-1"
+            >
+              {pausedBarHover && (
+                <div
+                  className={`pointer-events-none absolute bottom-full mb-1.5 -translate-x-1/2 rounded-md px-1.5 py-0.5 font-mono-tabular text-[10px] font-semibold whitespace-nowrap shadow-md ${
+                    isDarkTheme
+                      ? 'border border-white/15 bg-slate-900/95 text-white'
+                      : 'border border-slate-900/15 bg-slate-900 text-white'
+                  }`}
+                  style={{
+                    left: `${Math.min(90, Math.max(10, pausedBarHover.ratio * 100))}%`,
+                  }}
+                >
+                  {narration.duration > 0 ? formatTrackTime(pausedBarHover.timeSec) : '--:--'}
+                </div>
+              )}
+              <div
+                className={`relative h-2 w-full overflow-hidden rounded-full ${
+                  isDarkTheme ? 'bg-white/12' : 'bg-slate-900/10'
+                }`}
+              >
+                <div
+                  className={`h-full rounded-full transition-[width] duration-150 ${
+                    isEdicion3 ? 'bg-[#F59E0B]' : isBenchmark ? 'bg-[#00F0FF]' : 'bg-[#0284C7]'
+                  }`}
+                  style={{ width: `${Math.round(narration.progress * 100)}%` }}
+                />
+              </div>
+              {pausedBarHover && (
+                <span
+                  aria-hidden="true"
+                  className={`pointer-events-none absolute top-1/2 h-3 w-0.5 -translate-x-1/2 -translate-y-1/2 rounded-full ${
+                    isDarkTheme ? 'bg-white/90' : 'bg-slate-900/80'
+                  }`}
+                  style={{ left: `${pausedBarHover.ratio * 100}%` }}
+                />
+              )}
+            </div>
+            <span
+              className={`font-mono-tabular w-8 text-right text-[10px] font-semibold ${
+                isEdicion3
+                  ? 'text-[#F59E0B]'
+                  : isBenchmark
+                    ? 'text-[#00F0FF]'
+                    : 'text-[#0284C7]'
+              }`}
+            >
+              {Math.round(narration.progress * 100)}%
+            </span>
+          </div>
+        </aside>
+      )}
 
       {/* Static Export & Cloudflare Deep-Link Modal */}
       <ExportReportModal

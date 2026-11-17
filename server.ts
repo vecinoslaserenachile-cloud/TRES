@@ -92,21 +92,66 @@ function verifyEdicion3Token(token: string | undefined): boolean {
 }
 
 const DEFAULT_STYLE =
-  'Locutor profesional chileno de nivel ejecutivo presentando un informe estratégico ante un directorio: voz humana cálida, natural, expresiva, con pausas respiratorias auténticas, énfasis en las cifras clave y tono conversacional fluido sin sonar robótico.';
+  'Locutora chilena cálida, cercana y muy expresiva: voz humana natural y conversacional, con entonación orgánica, pausas respiratorias suaves y ritmo ameno al explicar cifras.';
 
-// In-memory LRU-style audio cache (keyed by slideKey + voice)
+const VOICE_STYLES: Record<string, string> = {
+  Kore: 'Locutora chilena cálida, cercana y muy expresiva: voz humana natural y conversacional, con entonación orgánica, pausas respiratorias suaves y ritmo ameno al explicar cifras.',
+  Charon:
+    'Locutor chileno sereno, cercano y conversacional: voz masculina cálida y humana, timbre natural con inflexiones auténticas y pausas respiratorias fluidas.',
+  Puck: 'Narrador chileno ágil, amigable y expresivo: voz humana espontánea, tono cálido y dinámico con ritmo conversacional natural.',
+  Fenrir:
+    'Locutor chileno firme, cálido y claro: voz humana natural con entonación equilibrada y pausas respiratorias auténticas.',
+  Zephyr:
+    'Locutora chilena amable, luminosa y natural: voz conversacional fluida con entonación orgánica y ritmo cercano.',
+};
+
+function prepareTtsText(
+  text: string,
+  model: 'gemini-3.8-flash-lite-tts' | 'gemini-3.8-flash-tts'
+): string {
+  const cleaned = text.replace(/\s*<breath>\s*/gi, ' ').replace(/\s+/g, ' ').trim();
+  if (model !== 'gemini-3.8-flash-tts') {
+    return cleaned;
+  }
+  // Convert editorial ellipsis pauses into subtle breath cues supported by gemini-3.8-flash-tts
+  return cleaned.replace(/\.\.\.\s+/g, '. <breath> ');
+}
+
+const INTONATION_MODIFIERS: Record<string, string> = {
+  natural:
+    'Entonación orgánica y conversacional, con modulaciones naturales al enfatizar cifras clave y pausas suaves.',
+  cercana:
+    'Tono cálido, cercano y amigable, como conversando cara a cara con un equipo regional, con matices expresivos.',
+  periodistica:
+    'Tono de presentador informativo moderno, claro, ágil y seguro, con cadencia humana fluida.',
+  pausada:
+    'Ritmo sereno, pausado y reflexivo, con pausas respiratorias amplias para seguir cada dato con calma.',
+};
+
+const PACE_MODIFIERS: Record<string, string> = {
+  lenta: 'Habla a una velocidad ligeramente pausada y relajada, articulando con naturalidad.',
+  normal: 'Habla a una velocidad conversacional equilibrada y fluida.',
+  agil: 'Habla con ritmo ágil y dinámico sin perder claridad ni calidez.',
+};
+
+interface CachedTtsEntry {
+  buffer: Buffer;
+  model: string;
+}
+
+// In-memory LRU-style audio cache (keyed by slideKey + voice + intonation + pace)
 const MAX_CACHE_ITEMS = 60;
-const audioCache = new Map<string, Buffer>();
-const inFlightRequests = new Map<string, Promise<Buffer>>();
+const audioCache = new Map<string, CachedTtsEntry>();
+const inFlightRequests = new Map<string, Promise<CachedTtsEntry>>();
 
-function setCacheEntry(cacheKey: string, wavBuffer: Buffer) {
+function setCacheEntry(cacheKey: string, entry: CachedTtsEntry) {
   if (audioCache.has(cacheKey)) {
     audioCache.delete(cacheKey);
   } else if (audioCache.size >= MAX_CACHE_ITEMS) {
     const oldestKey = audioCache.keys().next().value;
     if (oldestKey) audioCache.delete(oldestKey);
   }
-  audioCache.set(cacheKey, wavBuffer);
+  audioCache.set(cacheKey, entry);
 }
 
 function createGenAIClient(): GoogleGenAI | null {
@@ -131,6 +176,8 @@ async function callTtsModel(
   voiceName: string,
   style: string
 ): Promise<Buffer> {
+  const preparedText = prepareTtsText(text, model);
+  const resolvedStyle = style || VOICE_STYLES[voiceName] || DEFAULT_STYLE;
   const response = await ai.models.generateContent({
     model,
     contents: [
@@ -138,9 +185,9 @@ async function callTtsModel(
         role: 'user',
         parts: [
           {
-            text,
+            text: preparedText,
             speechMetadata: {
-              style: style || DEFAULT_STYLE,
+              style: resolvedStyle,
             },
           },
         ],
@@ -149,6 +196,7 @@ async function callTtsModel(
     config: {
       responseModalities: ['AUDIO'],
       speechConfig: {
+        languageCode: 'es',
         voiceConfig: {
           prebuiltVoiceConfig: {
             voiceName,
@@ -173,25 +221,28 @@ async function synthesizeWithRetry(
   text: string,
   voiceName: string,
   style: string
-): Promise<Buffer> {
-  const models: Array<'gemini-3.8-flash-lite-tts' | 'gemini-3.8-flash-tts'> = [
-    'gemini-3.8-flash-lite-tts',
+): Promise<{ buffer: Buffer; model: string }> {
+  const models: Array<'gemini-3.8-flash-tts' | 'gemini-3.8-flash-lite-tts'> = [
     'gemini-3.8-flash-tts',
+    'gemini-3.8-flash-lite-tts',
   ];
   let lastError: unknown;
 
   for (const model of models) {
     for (let i = 0; i < 2; i++) {
       try {
-        return await callTtsModel(ai, model, text, voiceName, style);
+        const buffer = await callTtsModel(ai, model, text, voiceName, style);
+        return { buffer, model };
       } catch (err) {
         lastError = err;
         const status = (err as { status?: number })?.status;
-        if (status === 400 || status === 401 || status === 403 || status === 404) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[TTS Fallback Warning] model=${model} attempt=${i + 1} status=${status} msg=${msg}`);
+        if (status === 401 || status === 403) {
           throw err;
         }
-        // On 429 quota exceeded, switch immediately to the next TTS model instead of looping
-        if (status === 429) {
+        // On 400/404/429 for this model, switch immediately to the fallback TTS model
+        if (status === 400 || status === 404 || status === 429) {
           break;
         }
         if (i === 0) {
@@ -289,7 +340,7 @@ async function startServer() {
   app.get('/api/tts/status', (_req, res) => {
     const apiKey = process.env.GEMINI_API_KEY?.trim();
     const configured = Boolean(apiKey && apiKey !== 'MY_GEMINI_API_KEY');
-    res.json({ configured, model: 'gemini-3.8-flash-lite-tts' });
+    res.json({ configured, model: 'gemini-3.8-flash-tts' });
   });
 
   // Synthesize natural human voice narration via Gemini 3.8 Flash Lite TTS
@@ -310,23 +361,34 @@ async function startServer() {
       typeof req.body?.voiceName === 'string' && ALLOWED_VOICES.has(req.body.voiceName)
         ? req.body.voiceName
         : 'Kore';
-    const rawStyle =
+    const rawIntonation =
+      typeof req.body?.intonation === 'string' && INTONATION_MODIFIERS[req.body.intonation]
+        ? req.body.intonation
+        : 'natural';
+    const rawPace =
+      typeof req.body?.pace === 'string' && PACE_MODIFIERS[req.body.pace]
+        ? req.body.pace
+        : 'normal';
+
+    const baseStyle =
       typeof req.body?.style === 'string' && req.body.style.trim()
         ? req.body.style.trim()
-        : DEFAULT_STYLE;
+        : (VOICE_STYLES[rawVoice] ?? DEFAULT_STYLE);
+    const rawStyle = `${baseStyle} ${INTONATION_MODIFIERS[rawIntonation]} ${PACE_MODIFIERS[rawPace]}`;
 
     if (!rawText) {
       res.status(400).json({ error: 'Falta el texto a narrar.', code: 'EMPTY_TEXT' });
       return;
     }
 
-    const cacheKey = `${rawVoice}::${rawKey || rawText.slice(0, 80)}::${rawText.length}`;
+    const cacheKey = `v3::${rawVoice}::${rawIntonation}::${rawPace}::${rawKey || rawText.slice(0, 80)}::${rawText.length}`;
 
     const cached = audioCache.get(cacheKey);
     if (cached) {
       res.setHeader('Content-Type', 'audio/wav');
       res.setHeader('X-Audio-Cache', 'HIT');
-      res.send(cached);
+      res.setHeader('X-Audio-Model', cached.model);
+      res.send(cached.buffer);
       return;
     }
 
@@ -337,13 +399,14 @@ async function startServer() {
         inFlightRequests.set(cacheKey, pending);
       }
 
-      const wavBuffer = await pending;
+      const result = await pending;
       inFlightRequests.delete(cacheKey);
-      setCacheEntry(cacheKey, wavBuffer);
+      setCacheEntry(cacheKey, result);
 
       res.setHeader('Content-Type', 'audio/wav');
       res.setHeader('X-Audio-Cache', 'MISS');
-      res.send(wavBuffer);
+      res.setHeader('X-Audio-Model', result.model);
+      res.send(result.buffer);
     } catch (err) {
       inFlightRequests.delete(cacheKey);
       const status = (err as { status?: number })?.status || 500;
