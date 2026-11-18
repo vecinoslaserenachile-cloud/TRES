@@ -186,6 +186,8 @@ function createColumnBar(options: {
   return { barGroup, shaft };
 }
 
+export type Edicion3SpiralVariant = 'podium' | 'ranking' | 'pov';
+
 /**
  * Computes zero-collision coordinates along a wide ascending conical spiral staircase for all 13 actors:
  * i = 0 (#13 base foreground) ascending up to i = 12 (#01 supreme crown apex).
@@ -193,7 +195,7 @@ function createColumnBar(options: {
 export function getSpiralPodiumCoordinates(
   indexFromBottom: number,
   total = 13,
-  variant: 'podium' | 'ranking' = 'podium'
+  variant: Edicion3SpiralVariant = 'podium'
 ): {
   x: number;
   y: number;
@@ -205,30 +207,109 @@ export function getSpiralPodiumCoordinates(
 } {
   const t = total > 1 ? indexFromBottom / (total - 1) : 1;
   const isRanking = variant === 'ranking';
-  const offsetX = isRanking ? 4.2 : 3.1;
-  const rx0 = isRanking ? 9.0 : 9.8;
-  const rx1 = isRanking ? 4.9 : 5.2;
-  const rz0 = isRanking ? 3.2 : 3.4;
-  const rz1 = isRanking ? 1.9 : 2.0;
+  const isPov = variant === 'pov';
+  const offsetX = isRanking ? 4.2 : isPov ? 0.0 : 3.1;
+  const rx0 = isRanking ? 9.0 : isPov ? 9.4 : 9.8;
+  const rx1 = isRanking ? 4.9 : isPov ? 4.6 : 5.2;
+  const rz0 = isRanking ? 3.2 : isPov ? 3.6 : 3.4;
+  const rz1 = isRanking ? 1.9 : isPov ? 2.1 : 2.0;
   const y0 = 0.75;
-  const y1 = isRanking ? 11.5 : 11.6;
+  const y1 = isRanking ? 11.5 : isPov ? 11.8 : 11.6;
 
   const theta = Math.PI * 0.92 - t * (Math.PI * 2 * 1.22);
   const rx = rx0 + (rx1 - rx0) * t;
   const rz = rz0 + (rz1 - rz0) * t;
   const x = offsetX + Math.cos(theta) * rx;
   const z = Math.sin(theta) * rz;
-  const y = y0 + (y1 - y0) * Math.pow(t, 0.95);
+  const y = y0 + (y1 - y0) * Math.pow(Math.max(0, t), 0.95);
   return { x, y, z, theta, t, rx, rz };
+}
+
+function evalSpiralContinuousPoint(
+  tVal: number,
+  variant: Edicion3SpiralVariant
+): { x: number; y: number; z: number; theta: number; offsetX: number } {
+  const isRanking = variant === 'ranking';
+  const isPov = variant === 'pov';
+  const offsetX = isRanking ? 4.2 : isPov ? 0.0 : 3.1;
+  const rx0 = isRanking ? 9.0 : isPov ? 9.4 : 9.8;
+  const rx1 = isRanking ? 4.9 : isPov ? 4.6 : 5.2;
+  const rz0 = isRanking ? 3.2 : isPov ? 3.6 : 3.4;
+  const rz1 = isRanking ? 1.9 : isPov ? 2.1 : 2.0;
+  const y0 = 0.75;
+  const y1 = isRanking ? 11.5 : isPov ? 11.8 : 11.6;
+
+  const tClampedRad = THREE.MathUtils.clamp(tVal, -0.18, 1.08);
+  const theta = Math.PI * 0.92 - tVal * (Math.PI * 2 * 1.22);
+  const rx = rx0 + (rx1 - rx0) * tClampedRad;
+  const rz = rz0 + (rz1 - rz0) * tClampedRad;
+  const x = offsetX + Math.cos(theta) * rx;
+  const z = Math.sin(theta) * rz;
+  const y =
+    tVal >= 0
+      ? y0 + (y1 - y0) * Math.pow(tVal, 0.95)
+      : y0 + tVal * (y1 - y0) * 0.68;
+  return { x, y, z, theta, offsetX };
+}
+
+/**
+ * Samples a smooth First-Person POV camera ascending slowly up the spiral staircase
+ * from step #13 (progress = 0) to step #1 (progress = 1). Zero heap allocations on outputs.
+ * Returns the rank [13..1] currently directly in front of the walker.
+ */
+export function sampleSpiralPovCamera(
+  progress: number,
+  variant: Edicion3SpiralVariant,
+  total: number,
+  outPos: THREE.Vector3,
+  outTarget: THREE.Vector3,
+  walkCycleSec = 0
+): number {
+  const u = THREE.MathUtils.clamp(progress, 0, 1);
+  const stepIndexFloat = u * Math.max(1, total - 1);
+  const activeRank = Math.max(1, Math.min(total, total - Math.round(stepIndexFloat)));
+
+  // Lag behind current focused step so the walker looks forward/upward along the walkable outer lane
+  const lagT = 0.095 + u * 0.068;
+  const tCam = u - lagT;
+  const tAhead = Math.min(1.04, u + 0.032);
+
+  const focusPt = evalSpiralContinuousPoint(u, variant);
+  const aheadPt = evalSpiralContinuousPoint(tAhead, variant);
+  const camBase = evalSpiralContinuousPoint(tCam, variant);
+
+  // Push camera radially outward slightly so the central spire & inner stringer never obstruct sightlines
+  const radX = camBase.x - camBase.offsetX;
+  const radZ = camBase.z;
+  const radLen = Math.hypot(radX, radZ) || 1;
+  const outerOffset = 1.25 + u * 0.72;
+
+  // Subtle steadycam walking breath (gentle, non-jarring)
+  const stepBob = Math.sin(walkCycleSec * 3.2) * 0.026;
+  const eyeHeight = 1.48 + stepBob;
+
+  outPos.set(
+    camBase.x + (radX / radLen) * outerOffset,
+    Math.max(0.95, camBase.y + eyeHeight),
+    camBase.z + (radZ / radLen) * outerOffset
+  );
+
+  // Look primarily at current authority stair banner & deck, slightly blending toward the next rising step
+  const targetX = focusPt.x * 0.8 + aheadPt.x * 0.2;
+  const targetY = focusPt.y * 0.82 + aheadPt.y * 0.18 + 0.74;
+  const targetZ = focusPt.z * 0.8 + aheadPt.z * 0.2;
+  outTarget.set(targetX, targetY, targetZ);
+
+  return activeRank;
 }
 
 export function getSpiralStepFocusCamera(
   x: number,
   y: number,
   z: number,
-  variant: 'podium' | 'ranking' = 'podium'
+  variant: Edicion3SpiralVariant = 'podium'
 ): { position: [number, number, number]; target: [number, number, number] } {
-  const offsetX = variant === 'ranking' ? 4.2 : 3.1;
+  const offsetX = variant === 'ranking' ? 4.2 : variant === 'pov' ? 0.0 : 3.1;
   const dx = x - offsetX;
   const norm = Math.hypot(dx, z) || 1;
   // Position close-up camera slightly outward & forward, looking down slightly so stair sits above bottom UI
@@ -1260,6 +1341,280 @@ export function buildEdicion3Slide4Ranking(): BuiltSlideScene {
     cameraPreset: {
       position: [-2.4, 6.2, 31.4],
       target: [-1.6, 4.1, 0.0],
+    },
+  };
+}
+
+// SLIDE 5: MODO VIDEO POV PRIMERA PERSONA — ASCENSO COMPLETO DEL #13 AL #01 DEL PERÍODO
+export function buildEdicion3Slide5PovAscent(): BuiltSlideScene {
+  const group = new THREE.Group();
+  const hoverables: THREE.Object3D[] = [];
+  const rankBars: { rank: number; group: THREE.Group; mesh: THREE.Mesh; baseColor: THREE.Color }[] = [];
+  const floatingNodes: { obj: THREE.Object3D; baseY: number; phase: number; speed: number }[] = [];
+  const gyroRings: THREE.Mesh[] = [];
+
+  const avgLikes =
+    EDICION3_AUTHORITIES.reduce((acc, a) => acc + a.likes, 0) / EDICION3_AUTHORITIES.length;
+
+  const coreX = 0.0;
+  const spireHeight = 13.4;
+
+  // Illuminated central obsidian-gold monument spire
+  const spire = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.24, 0.78, spireHeight, 36),
+    new THREE.MeshStandardMaterial({
+      color: '#0A1328',
+      roughness: 0.24,
+      metalness: 0.88,
+      emissive: new THREE.Color('#0E2954'),
+      emissiveIntensity: 0.5,
+      transparent: true,
+      opacity: 0.84,
+    })
+  );
+  spire.position.set(coreX, spireHeight / 2, 0);
+  group.add(spire);
+
+  // Summit beacon rings crowning rank #1 at top of ascent
+  [3.0, 6.8, 10.2, 13.1].forEach((ringY, idx) => {
+    const halo = new THREE.Mesh(
+      new THREE.TorusGeometry(1.05 - idx * 0.14, 0.032, 14, 56),
+      makeEditorialMaterial(idx >= 2 ? '#F59E0B' : '#00F0FF', 0.55, 0.88)
+    );
+    halo.rotation.x = Math.PI / 2;
+    halo.position.set(coreX, ringY, 0);
+    group.add(halo);
+    gyroRings.push(halo);
+  });
+
+  // Ground threshold compass ring under #13 start position
+  const baseRing = new THREE.Mesh(
+    new THREE.TorusGeometry(9.6, 0.04, 12, 96),
+    new THREE.MeshBasicMaterial({ color: '#00F0FF', transparent: true, opacity: 0.35 })
+  );
+  baseRing.rotation.x = Math.PI / 2;
+  baseRing.position.set(coreX, 0.05, 0);
+  group.add(baseRing);
+
+  const ascending = [...EDICION3_AUTHORITIES].reverse();
+  const spinePoints: THREE.Vector3[] = [];
+  const railPoints: THREE.Vector3[] = [];
+  const walkwayGuidePoints: THREE.Vector3[] = [];
+
+  ascending.forEach((auth, idx) => {
+    const { x, y, z, theta } = getSpiralPodiumCoordinates(idx, ascending.length, 'pov');
+
+    spinePoints.push(new THREE.Vector3(coreX + (x - coreX) * 0.76, y - 0.08, z * 0.76));
+    railPoints.push(
+      new THREE.Vector3(x + Math.cos(theta) * 0.9, y + 0.22, z + Math.sin(theta) * 0.48)
+    );
+    walkwayGuidePoints.push(new THREE.Vector3(x, y + 0.24, z));
+
+    const payload: HoverPayload = {
+      title: `#${String(auth.rank).padStart(2, '0')} ${auth.name} (${auth.handle})`,
+      metric: `${auth.likesLabel} Me gusta · ${auth.commentsLabel} com.`,
+      subtitle: `${auth.followersLabel} seg · ${auth.posts} posts · ${auth.erLabel} ER · ${auth.ppiLabel} PPI`,
+      color: auth.color,
+      rank: auth.rank,
+      variancePct: calcVariancePct(auth.likes, avgLikes),
+      averageLabel: '52,0k prom. 13 autor.',
+    };
+
+    const stepGroup = new THREE.Group();
+    stepGroup.position.set(x, 0, z);
+
+    const stepYaw = -Math.sin(theta) * 0.32;
+    const stairMeshGroup = new THREE.Group();
+    stairMeshGroup.rotation.y = stepYaw;
+
+    const treadWidth = 2.75;
+    const treadDepth = 1.48;
+    const isTop3 = auth.rank <= 3;
+
+    const riserH = Math.max(0.24, y);
+    const riser = new THREE.Mesh(
+      new THREE.BoxGeometry(treadWidth - 0.32, riserH, treadDepth * 0.56),
+      new THREE.MeshStandardMaterial({
+        color: '#0A1328',
+        roughness: 0.34,
+        metalness: 0.8,
+        transparent: true,
+        opacity: 0.92,
+      })
+    );
+    riser.position.y = riserH / 2;
+    stairMeshGroup.add(riser);
+
+    const topDeck = new THREE.Mesh(
+      new THREE.BoxGeometry(treadWidth, 0.18, treadDepth),
+      makeEditorialMaterial(auth.color, isTop3 ? 0.52 : 0.3, 0.96)
+    );
+    topDeck.position.y = y + 0.09;
+    stairMeshGroup.add(topDeck);
+
+    // Illuminated front threshold strip on each step for clear First-Person POV depth cueing
+    const nosingStrip = new THREE.Mesh(
+      new THREE.BoxGeometry(treadWidth + 0.06, 0.07, 0.1),
+      new THREE.MeshBasicMaterial({ color: isTop3 ? '#F59E0B' : auth.color })
+    );
+    nosingStrip.position.set(0, y + 0.17, treadDepth * 0.5);
+    stairMeshGroup.add(nosingStrip);
+
+    // Floating milestone diamond beacon beside every step
+    const diamond = new THREE.Mesh(
+      new THREE.OctahedronGeometry(isTop3 ? 0.19 : 0.12, 0),
+      makeEditorialMaterial(isTop3 ? '#F59E0B' : auth.color, 0.72, 0.96)
+    );
+    diamond.position.set(treadWidth * 0.44, y + 0.48, 0.25);
+    stairMeshGroup.add(diamond);
+    floatingNodes.push({
+      obj: diamond,
+      baseY: y + 0.48,
+      phase: idx * 0.55,
+      speed: 2.1,
+    });
+
+    if (isTop3) {
+      const pylonH = auth.rank === 1 ? 0.72 : auth.rank === 2 ? 0.52 : 0.38;
+      const trophyPylon = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.1, 0.15, pylonH, 24),
+        makeEditorialMaterial('#F59E0B', 0.65, 0.96)
+      );
+      trophyPylon.position.set(-treadWidth * 0.44, y + 0.18 + pylonH / 2, -0.35);
+      stairMeshGroup.add(trophyPylon);
+      registerHoverable(trophyPylon, hoverables, payload, topDeck);
+    }
+
+    stepGroup.add(stairMeshGroup);
+
+    const flashRing = new THREE.Mesh(
+      new THREE.TorusGeometry(1.58, 0.065, 12, 48),
+      new THREE.MeshBasicMaterial({ color: '#FFFFFF', transparent: true, opacity: 0 })
+    );
+    flashRing.rotation.x = Math.PI / 2;
+    flashRing.position.set(0, y + 0.2, 0);
+    stepGroup.add(flashRing);
+
+    const flashRingOuter = new THREE.Mesh(
+      new THREE.TorusGeometry(1.78, 0.048, 12, 48),
+      new THREE.MeshBasicMaterial({ color: '#F59E0B', transparent: true, opacity: 0 })
+    );
+    flashRingOuter.rotation.x = Math.PI / 2;
+    flashRingOuter.position.set(0, y + 0.2, 0);
+    stepGroup.add(flashRingOuter);
+
+    const highlightHalo = new THREE.Mesh(
+      new THREE.TorusGeometry(1.46, 0.048, 12, 48),
+      new THREE.MeshBasicMaterial({ color: auth.color, transparent: true, opacity: 0 })
+    );
+    highlightHalo.rotation.x = Math.PI / 2;
+    highlightHalo.position.set(0, y + 0.22, 0);
+    stepGroup.add(highlightHalo);
+
+    const flareTex = createDarkDestelloFlareTexture(auth.color);
+    const destelloFlare = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: flareTex,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+    );
+    destelloFlare.scale.set(3.9, 2.25, 1);
+    destelloFlare.position.set(0, y + 0.74, 0);
+    destelloFlare.renderOrder = 55;
+    stepGroup.add(destelloFlare);
+
+    const stem = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.018, 0.022, 0.34, 8),
+      new THREE.MeshBasicMaterial({ color: isTop3 ? '#F59E0B' : auth.color })
+    );
+    stem.position.set(0, y + 0.35, 0);
+    stepGroup.add(stem);
+
+    const bannerTex = createDarkFullWidthStairBannerTexture(
+      `#${String(auth.rank).padStart(2, '0')}`,
+      auth.shortName,
+      auth.handle,
+      `${auth.likesLabel} likes · ${auth.erLabel} ER · ${auth.ppiLabel} PPI`,
+      getSpecialDetailLabel(auth.rank),
+      auth.color,
+      isTop3
+    );
+
+    const stairSprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: bannerTex, transparent: true, depthWrite: false })
+    );
+    const baseSpriteScale: [number, number, number] = [3.4, 0.94, 1];
+    stairSprite.scale.set(...baseSpriteScale);
+    stairSprite.position.set(0, y + 0.92, 0);
+    stairSprite.renderOrder = 10 + (13 - auth.rank);
+    stepGroup.add(stairSprite);
+
+    const focusMeta: SpiralStepFocusMeta = {
+      rank: auth.rank,
+      worldAnchor: [x, y + 0.92, z],
+      focusCamera: getSpiralStepFocusCamera(x, y, z, 'pov'),
+      stairSprite,
+      destelloFlare,
+      flashRing,
+      flashRingOuter,
+      highlightHalo,
+      baseSpriteScale,
+    };
+    stepGroup.userData.focusMeta = focusMeta;
+
+    registerHoverable(riser, hoverables, payload, topDeck);
+    registerHoverable(topDeck, hoverables, payload, topDeck);
+    registerHoverable(stairSprite, hoverables, payload, topDeck);
+
+    group.add(stepGroup);
+    rankBars.push({
+      rank: auth.rank,
+      group: stepGroup,
+      mesh: topDeck,
+      baseColor: new THREE.Color(auth.color),
+    });
+  });
+
+  if (spinePoints.length >= 2) {
+    const innerCurve = new THREE.CatmullRomCurve3(spinePoints);
+    group.add(
+      new THREE.Mesh(
+        new THREE.TubeGeometry(innerCurve, 140, 0.085, 12, false),
+        makeEditorialMaterial('#00F0FF', 0.42, 0.86)
+      )
+    );
+  }
+
+  if (railPoints.length >= 2) {
+    const railCurve = new THREE.CatmullRomCurve3(railPoints);
+    group.add(
+      new THREE.Mesh(
+        new THREE.TubeGeometry(railCurve, 140, 0.068, 12, false),
+        makeEditorialMaterial('#F59E0B', 0.56, 0.94)
+      )
+    );
+  }
+
+  if (walkwayGuidePoints.length >= 2) {
+    const walkCurve = new THREE.CatmullRomCurve3(walkwayGuidePoints);
+    group.add(
+      new THREE.Mesh(
+        new THREE.TubeGeometry(walkCurve, 160, 0.032, 8, false),
+        new THREE.MeshBasicMaterial({ color: '#00F0FF', transparent: true, opacity: 0.48 })
+      )
+    );
+  }
+
+  return {
+    group,
+    hoverables,
+    animatedObjects: { rankBars, floatingNodes, gyroRings },
+    cameraPreset: {
+      position: [-10.8, 3.8, 17.8],
+      target: [0.0, 4.8, 0.0],
     },
   };
 }

@@ -6,6 +6,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { EDICION3_AUTHORITIES } from '../data/edicion3Data';
 import {
   Edicion3DuelMode,
+  Edicion3SpiralVariant,
   SpiralBaseTimeSeriesRef,
   SpiralStepFocusMeta,
   buildEdicion3Slide0Overview,
@@ -13,6 +14,8 @@ import {
   buildEdicion3Slide2Efficiency,
   buildEdicion3Slide3Duel,
   buildEdicion3Slide4Ranking,
+  buildEdicion3Slide5PovAscent,
+  sampleSpiralPovCamera,
 } from '../three/edicion3Builders';
 import {
   createDarkFloatingBadgeTexture,
@@ -29,12 +32,18 @@ export interface Edicion3SignalOrigin {
   nonce: number;
 }
 
+export interface Edicion3PovClimbState {
+  variant: Edicion3SpiralVariant;
+  progress: number;
+}
+
 interface Edicion3SceneCanvasProps {
   activeSlide: number;
   duelMode: Edicion3DuelMode;
   highlightedRank: number | null;
   selectedRank?: number | null;
   signalOrigin?: Edicion3SignalOrigin | null;
+  povClimb?: Edicion3PovClimbState | null;
   resetCameraNonce: number;
   freeOrbitMode: boolean;
   autoPresent: boolean;
@@ -55,6 +64,8 @@ interface TooltipState {
 
 const _targetCamPos = new THREE.Vector3();
 const _targetLookAt = new THREE.Vector3();
+const _povCamPos = new THREE.Vector3();
+const _povLookAt = new THREE.Vector3();
 const _mouseNdc = new THREE.Vector2();
 const _tempColor = new THREE.Color();
 const _tempDelta = new THREE.Vector3();
@@ -112,6 +123,7 @@ export const Edicion3SceneCanvas = forwardRef<Scene3DHandle, Edicion3SceneCanvas
       highlightedRank,
       selectedRank = null,
       signalOrigin = null,
+      povClimb = null,
       resetCameraNonce,
       freeOrbitMode,
       autoPresent,
@@ -138,6 +150,7 @@ export const Edicion3SceneCanvas = forwardRef<Scene3DHandle, Edicion3SceneCanvas
     const highlightedRankRef = useRef(highlightedRank);
     const selectedRankRef = useRef(selectedRank);
     const signalOriginRef = useRef(signalOrigin);
+    const povClimbRef = useRef(povClimb);
     const freeOrbitRef = useRef(freeOrbitMode);
     const autoPresentRef = useRef(autoPresent);
     const hudCollapsedRef = useRef(hudCollapsed);
@@ -156,6 +169,7 @@ export const Edicion3SceneCanvas = forwardRef<Scene3DHandle, Edicion3SceneCanvas
     highlightedRankRef.current = highlightedRank;
     selectedRankRef.current = selectedRank;
     signalOriginRef.current = signalOrigin;
+    povClimbRef.current = povClimb;
     freeOrbitRef.current = freeOrbitMode;
     autoPresentRef.current = autoPresent;
     hudCollapsedRef.current = hudCollapsed;
@@ -180,7 +194,7 @@ export const Edicion3SceneCanvas = forwardRef<Scene3DHandle, Edicion3SceneCanvas
       if (!freeOrbitMode || selectedRank !== null) {
         cameraTransitionActiveRef.current = true;
       }
-    }, [activeSlide, resetCameraNonce, hudCollapsed, directorCamera, freeOrbitMode, selectedRank]);
+    }, [activeSlide, resetCameraNonce, hudCollapsed, directorCamera, freeOrbitMode, selectedRank, povClimb]);
 
     useEffect(() => {
       if (selectedRank !== null || signalOrigin) {
@@ -323,6 +337,7 @@ export const Edicion3SceneCanvas = forwardRef<Scene3DHandle, Edicion3SceneCanvas
         buildEdicion3Slide2Efficiency(),
         duelData.scene,
         buildEdicion3Slide4Ranking(),
+        buildEdicion3Slide5PovAscent(),
       ];
 
       builtSlides.forEach((s, idx) => {
@@ -541,18 +556,21 @@ export const Edicion3SceneCanvas = forwardRef<Scene3DHandle, Edicion3SceneCanvas
           activeScene.group.scale.setScalar(nextScale);
 
           const hasSelected = selectedRankRef.current !== null;
-          if (hasSelected && !freeOrbitRef.current) {
-            // Keep locked target steady and aligned when zooming into details
+          const activePov =
+            !freeOrbitRef.current && !hasSelected ? povClimbRef.current : null;
+
+          if ((hasSelected || activePov) && !freeOrbitRef.current) {
+            // Keep locked target steady and aligned during close-up focus or First-Person POV walk
             activeScene.group.rotation.y = THREE.MathUtils.damp(
               activeScene.group.rotation.y,
               0,
-              6.5,
+              7.5,
               delta
             );
             activeScene.group.rotation.x = THREE.MathUtils.damp(
               activeScene.group.rotation.x,
               0,
-              6.5,
+              7.5,
               delta
             );
           } else if (autoPresentRef.current && !freeOrbitRef.current) {
@@ -817,7 +835,36 @@ export const Edicion3SceneCanvas = forwardRef<Scene3DHandle, Edicion3SceneCanvas
             }
           }
 
-          if (cameraTransitionActiveRef.current) {
+          const isPovRunning = Boolean(
+            !freeOrbitRef.current && !hasSelected && povClimbRef.current
+          );
+          controls.minDistance = isPovRunning ? 1.2 : 4.2;
+
+          if (isPovRunning && povClimbRef.current) {
+            sampleSpiralPovCamera(
+              povClimbRef.current.progress,
+              povClimbRef.current.variant,
+              13,
+              _povCamPos,
+              _povLookAt,
+              elapsed
+            );
+            // Gentle portrait pull on narrow phones so wide step banners stay framed inside FOV
+            if (camera.aspect < 0.85) {
+              const pull = Math.min(1.42, 1.02 / Math.max(camera.aspect, 0.52));
+              _tempDelta.copy(_povCamPos).sub(_povLookAt).multiplyScalar(pull);
+              _povCamPos.copy(_povLookAt).add(_tempDelta);
+            }
+            const povDamp = 5.4;
+            camera.position.x = THREE.MathUtils.damp(camera.position.x, _povCamPos.x, povDamp, delta);
+            camera.position.y = THREE.MathUtils.damp(camera.position.y, _povCamPos.y, povDamp, delta);
+            camera.position.z = THREE.MathUtils.damp(camera.position.z, _povCamPos.z, povDamp, delta);
+
+            controls.target.x = THREE.MathUtils.damp(controls.target.x, _povLookAt.x, povDamp, delta);
+            controls.target.y = THREE.MathUtils.damp(controls.target.y, _povLookAt.y, povDamp, delta);
+            controls.target.z = THREE.MathUtils.damp(controls.target.z, _povLookAt.z, povDamp, delta);
+            cameraTransitionActiveRef.current = true;
+          } else if (cameraTransitionActiveRef.current) {
             const activeDirector = !freeOrbitRef.current ? directorCameraRef.current : null;
             const camCfg = focusedCameraPreset ?? activeDirector ?? activeScene.cameraPreset;
             applyPortraitFraming(
@@ -988,7 +1035,7 @@ export const Edicion3SceneCanvas = forwardRef<Scene3DHandle, Edicion3SceneCanvas
     const tooltipLeft = tooltip
       ? Math.max(12, Math.min(tooltip.x + 14, window.innerWidth - tooltipW - 12))
       : 0;
-    const bottomReserve = activeSlide === 1 ? 355 : 225;
+    const bottomReserve = activeSlide === 1 ? 355 : activeSlide === 5 ? 205 : 225;
     const tooltipTop = tooltip
       ? Math.max(68, Math.min(tooltip.y - 24, window.innerHeight - bottomReserve))
       : 0;

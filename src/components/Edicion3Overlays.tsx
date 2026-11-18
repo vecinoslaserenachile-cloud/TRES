@@ -4,12 +4,17 @@ import {
   ChevronLeft,
   ChevronRight,
   ClipboardList,
+  Grid3X3,
   Maximize2,
   Network,
+  Pause,
+  Play,
+  RotateCcw,
   Search,
   Sparkles,
   TrendingDown,
   TrendingUp,
+  Video,
   X,
 } from 'lucide-react';
 import {
@@ -28,6 +33,8 @@ import { Edicion3DuelMode } from '../three/edicion3Builders';
 
 type SortField = 'rank' | 'followers' | 'posts' | 'likes' | 'comments' | 'erPct' | 'ppiPct';
 
+const ASCENDING_AUTHORITIES = [...EDICION3_AUTHORITIES].sort((a, b) => b.rank - a.rank);
+
 interface Edicion3OverlaysProps {
   activeSlide: number;
   duelMode: Edicion3DuelMode;
@@ -38,6 +45,11 @@ interface Edicion3OverlaysProps {
   onSelectRank: (rank: number | null, origin?: { x: number; y: number }) => void;
   hudCollapsed: boolean;
   accessLogCount: number;
+  isPovPlaying?: boolean;
+  povProgress?: number | null;
+  onTogglePov?: () => void;
+  onSeekPov?: (progress: number) => void;
+  onOpenActorAnalysis?: () => void;
   onOpenWordNetwork: () => void;
   onOpenAccessLogs: () => void;
 }
@@ -340,6 +352,11 @@ export const Edicion3Overlays: React.FC<Edicion3OverlaysProps> = ({
   onSelectRank,
   hudCollapsed,
   accessLogCount,
+  isPovPlaying = false,
+  povProgress = null,
+  onTogglePov,
+  onSeekPov,
+  onOpenActorAnalysis,
   onOpenWordNetwork,
   onOpenAccessLogs,
 }) => {
@@ -368,6 +385,28 @@ export const Edicion3Overlays: React.FC<Edicion3OverlaysProps> = ({
     });
   }, [query, roleFilter, sortAsc, sortBy]);
 
+  const timeSeriesAuthority = useMemo(() => {
+    const targetRank = selectedRank ?? highlightedRank ?? 1;
+    return EDICION3_AUTHORITIES.find((a) => a.rank === targetRank) ?? EDICION3_AUTHORITIES[0];
+  }, [highlightedRank, selectedRank]);
+
+  const clampedPovProgress =
+    povProgress !== null && Number.isFinite(povProgress)
+      ? Math.max(0, Math.min(1, povProgress))
+      : null;
+
+  const activePovRank =
+    selectedRank ??
+    highlightedRank ??
+    (clampedPovProgress !== null
+      ? Math.max(1, Math.min(13, Math.round(13 - clampedPovProgress * 12)))
+      : 13);
+
+  const activePovAuthority = useMemo(
+    () => EDICION3_AUTHORITIES.find((a) => a.rank === activePovRank) ?? EDICION3_AUTHORITIES[12],
+    [activePovRank]
+  );
+
   if (hudCollapsed) return null;
 
   const meta = EDICION3_SLIDES[activeSlide] ?? EDICION3_SLIDES[0];
@@ -375,12 +414,10 @@ export const Edicion3Overlays: React.FC<Edicion3OverlaysProps> = ({
     selectedRank !== null
       ? EDICION3_AUTHORITIES.find((a) => a.rank === selectedRank) ?? null
       : null;
-  const timeSeriesAuthority = useMemo(() => {
-    const targetRank = selectedRank ?? highlightedRank ?? 1;
-    return EDICION3_AUTHORITIES.find((a) => a.rank === targetRank) ?? EDICION3_AUTHORITIES[0];
-  }, [highlightedRank, selectedRank]);
   const showDetailSpotlight =
     Boolean(selectedAuthority) && (activeSlide === 1 || activeSlide === 4);
+  const isStaircaseSlide = activeSlide === 1 || activeSlide === 4 || activeSlide === 5;
+  const effectivePovProgress = clampedPovProgress ?? (13 - activePovAuthority.rank) / 12;
 
   const handleSort = (field: SortField) => {
     if (sortBy === field) {
@@ -416,6 +453,26 @@ export const Edicion3Overlays: React.FC<Edicion3OverlaysProps> = ({
           className="pointer-events-auto flex flex-col items-end gap-2.5"
         >
           <div className="flex flex-wrap items-center justify-end gap-2">
+            {isStaircaseSlide && onTogglePov && (
+              <button
+                type="button"
+                onClick={onTogglePov}
+                title="Recorrido Video POV en primera persona subiendo la escalera desde el #13 al #1"
+                className={`inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border px-3 text-xs font-semibold transition-colors ${
+                  isPovPlaying
+                    ? 'border-[#FF2E93] bg-[#FF2E93] text-white shadow-lg shadow-[#FF2E93]/25'
+                    : 'border-[#F59E0B]/45 bg-[#F59E0B]/15 text-[#FDE68A] hover:bg-[#F59E0B] hover:text-[#060B19]'
+                }`}
+              >
+                {isPovPlaying ? (
+                  <Pause className="h-3.5 w-3.5" />
+                ) : (
+                  <Video className="h-3.5 w-3.5" />
+                )}
+                <span>{isPovPlaying ? 'Pausar Video POV' : 'Video POV (#13 → #1)'}</span>
+              </button>
+            )}
+
             {showDetailSpotlight && (
               <button
                 type="button"
@@ -424,6 +481,18 @@ export const Edicion3Overlays: React.FC<Edicion3OverlaysProps> = ({
               >
                 <Maximize2 className="h-3.5 w-3.5" />
                 <span>Ver Escalera Completa (13)</span>
+              </button>
+            )}
+
+            {onOpenActorAnalysis && (
+              <button
+                type="button"
+                onClick={onOpenActorAnalysis}
+                title="Abrir panel de Análisis de Actores: matriz visual de calor Sentimiento × Engagement"
+                className="inline-flex min-h-[40px] items-center gap-2 rounded-xl border border-[#14B8A6]/50 bg-[#14B8A6]/15 px-3.5 text-xs font-semibold text-[#2DD4BF] transition-colors hover:bg-[#14B8A6] hover:text-[#060B19]"
+              >
+                <Grid3X3 className="h-4 w-4" />
+                <span>Análisis de Actores</span>
               </button>
             )}
 
@@ -603,6 +672,16 @@ export const Edicion3Overlays: React.FC<Edicion3OverlaysProps> = ({
                     {s.posts} ({s.pct.toFixed(1).replace('.', ',')}%)
                   </span>
                 ))}
+                {onOpenActorAnalysis && (
+                  <button
+                    type="button"
+                    onClick={onOpenActorAnalysis}
+                    className="inline-flex items-center gap-1 font-semibold text-[#2DD4BF] transition-colors hover:text-white hover:underline"
+                  >
+                    <Grid3X3 className="h-3.5 w-3.5" />
+                    <span>Matriz Sentimiento × Engagement</span>
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -1037,6 +1116,189 @@ export const Edicion3Overlays: React.FC<Edicion3OverlaysProps> = ({
             </div>
             <div className="pointer-events-auto lg:col-span-4 lg:flex lg:flex-col lg:justify-end xl:col-span-5">
               <HistoricalErTimeSeriesCard authority={timeSeriesAuthority} />
+            </div>
+          </div>
+        )}
+
+        {/* SLIDE 5: VIDEO POV EN PRIMERA PERSONA · ASCENSO COMPLETO DEL #13 AL #01 */}
+        {activeSlide === 5 && (
+          <div className="pointer-events-auto mx-auto max-w-5xl">
+            <div className="dark-glass-panel rounded-2xl border border-[#F59E0B]/35 bg-[#070E20]/88 p-3.5 shadow-2xl sm:p-4">
+              {/* Top Telemetry Header: Active Climbing Step + Full KPI Strip */}
+              <div className="flex flex-col gap-3 border-b border-white/10 pb-3 lg:flex-row lg:items-center lg:justify-between">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span
+                      className="font-mono-tabular inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-extrabold text-[#060B19]"
+                      style={{ backgroundColor: activePovAuthority.color }}
+                    >
+                      PELDAÑO #{String(activePovAuthority.rank).padStart(2, '0')} / 13
+                    </span>
+                    <span className="font-mono-tabular text-[11px] font-semibold text-[#00F0FF]">
+                      {activePovAuthority.handle}
+                    </span>
+                    <span className="text-[11px] text-slate-400">
+                      · {activePovAuthority.role}
+                    </span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5">
+                    <h2 className="font-display text-base font-bold text-white sm:text-lg">
+                      {activePovAuthority.name}
+                    </h2>
+                    <span className="text-xs text-slate-300">
+                      {activePovAuthority.highlightNote}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="grid shrink-0 grid-cols-3 gap-x-4 gap-y-1.5 text-right sm:grid-cols-6">
+                  <div>
+                    <div className="text-[10px] text-slate-400">Seguidores</div>
+                    <div className="font-mono-tabular text-xs font-bold text-slate-200">
+                      {activePovAuthority.followersLabel}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-slate-400">Posts</div>
+                    <div className="font-mono-tabular text-xs font-bold text-white">
+                      {activePovAuthority.posts}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-slate-400">Me gusta</div>
+                    <div
+                      className="font-mono-tabular text-xs font-bold"
+                      style={{ color: activePovAuthority.color }}
+                    >
+                      {activePovAuthority.likesLabel}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-slate-400">Com.</div>
+                    <div className="font-mono-tabular text-xs font-bold text-white">
+                      {activePovAuthority.commentsLabel}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-slate-400">ER</div>
+                    <div className="font-mono-tabular text-xs font-bold text-[#00F0FF]">
+                      {activePovAuthority.erLabel}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-slate-400">PPI</div>
+                    <div className="font-mono-tabular text-xs font-bold text-[#10B981]">
+                      {activePovAuthority.ppiLabel}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Controls & Scrubbable POV Timeline Rail */}
+              <div className="mt-2.5 flex flex-wrap items-center gap-2.5">
+                {onTogglePov && (
+                  <button
+                    type="button"
+                    onClick={onTogglePov}
+                    className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition-colors ${
+                      isPovPlaying
+                        ? 'bg-[#FF2E93] text-white'
+                        : 'bg-[#F59E0B] text-[#060B19] hover:bg-amber-400'
+                    }`}
+                  >
+                    {isPovPlaying ? (
+                      <>
+                        <Pause className="h-3.5 w-3.5" />
+                        <span>Pausar Ascenso</span>
+                      </>
+                    ) : (
+                      <>
+                        <Play className="h-3.5 w-3.5 fill-current" />
+                        <span>{effectivePovProgress >= 0.99 ? 'Repetir Ascenso' : 'Subir Escalera POV'}</span>
+                      </>
+                    )}
+                  </button>
+                )}
+
+                {onSeekPov && (
+                  <button
+                    type="button"
+                    onClick={() => onSeekPov(0)}
+                    title="Volver al peldaño #13"
+                    className="inline-flex h-8 items-center gap-1 rounded-lg border border-white/15 bg-white/[0.05] px-2.5 text-xs font-medium text-slate-200 transition-colors hover:bg-white/15"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    <span>Base #13</span>
+                  </button>
+                )}
+
+                <div
+                  role="slider"
+                  tabIndex={0}
+                  aria-label="Progreso de ascenso POV del peldaño #13 al #1"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.round(effectivePovProgress * 100)}
+                  onClick={(e) => {
+                    if (!onSeekPov) return;
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    if (rect.width > 0) {
+                      onSeekPov((e.clientX - rect.left) / rect.width);
+                    }
+                  }}
+                  className="relative flex h-6 flex-1 min-w-[140px] cursor-pointer items-center"
+                >
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-white/12">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-[#00F0FF] via-[#F59E0B] to-[#FF2E93] transition-[width] duration-150"
+                      style={{ width: `${Math.round(effectivePovProgress * 100)}%` }}
+                    />
+                  </div>
+                </div>
+
+                <span className="font-mono-tabular text-[11px] font-semibold text-[#F59E0B]">
+                  {Math.round(effectivePovProgress * 100)}% ascenso
+                </span>
+              </div>
+
+              {/* 13-Step Ascending Selector Strip (#13 -> #01) */}
+              <div className="mt-2.5 grid grid-cols-4 gap-1 sm:grid-cols-7 lg:grid-cols-13">
+                {ASCENDING_AUTHORITIES.map((auth) => {
+                  const isActive = activePovAuthority.rank === auth.rank;
+                  const stepProgress = (13 - auth.rank) / 12;
+                  return (
+                    <button
+                      key={auth.handle}
+                      type="button"
+                      data-ed3-rank={auth.rank}
+                      onMouseEnter={() => onHoverRank(auth.rank)}
+                      onMouseLeave={() => onHoverRank(null)}
+                      onClick={() => {
+                        if (onSeekPov) {
+                          onSeekPov(stepProgress);
+                        } else {
+                          onSelectRank(auth.rank);
+                        }
+                      }}
+                      className={`cursor-pointer rounded-lg border px-1.5 py-1 text-left transition-all ${
+                        isActive
+                          ? 'border-[#F59E0B] bg-[#F59E0B]/22 ring-1 ring-[#F59E0B]/70'
+                          : 'border-white/10 bg-white/[0.03] hover:border-white/30 hover:bg-white/[0.08]'
+                      }`}
+                    >
+                      <div
+                        className="font-mono-tabular text-[10px] font-extrabold"
+                        style={{ color: auth.color }}
+                      >
+                        #{String(auth.rank).padStart(2, '0')}
+                      </div>
+                      <div className="truncate text-[10px] font-medium text-slate-200">
+                        {auth.shortName.split(' ')[0]}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </div>
         )}

@@ -61,6 +61,15 @@ export const EDICION3_SLIDES: Edicion3SlideMeta[] = [
     subtitle:
       'Explora cada indicador de senadores, diputados y alcaldes con ordenamiento interactivo y sincronización 3D en vivo.',
   },
+  {
+    id: 5,
+    slug: 'recorrido-pov-ranking',
+    shortLabel: 'Video POV',
+    kicker: 'Lámina 06 · Modo Video POV 1ª Persona · Ascenso #13 al #1',
+    title: 'Recorrido POV por Todo el Ranking del Período',
+    subtitle:
+      'Ascenso continuo en primera persona peldaño a peldaño desde el puesto #13 hasta el liderazgo regional #1 en la escalera espiral 3D.',
+  },
 ];
 
 export type AuthorityRoleCategory = 'Diputado/a' | 'Senador' | 'Alcalde/sa';

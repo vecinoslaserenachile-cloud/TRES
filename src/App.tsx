@@ -36,8 +36,13 @@ import {
   loadLocalAccessLogs,
   mergeAccessLogs,
 } from './components/Edicion3AccessGate';
+import { Edicion3ActorAnalysisPanel } from './components/Edicion3ActorAnalysisPanel';
 import { Edicion3Overlays } from './components/Edicion3Overlays';
-import { Edicion3SceneCanvas, Edicion3SignalOrigin } from './components/Edicion3SceneCanvas';
+import {
+  Edicion3PovClimbState,
+  Edicion3SceneCanvas,
+  Edicion3SignalOrigin,
+} from './components/Edicion3SceneCanvas';
 import { Edicion3WordCloudNetwork } from './components/Edicion3WordCloudNetwork';
 import { ExportMode, ExportReportModal } from './components/ExportReportModal';
 import { Scene3DCanvas, Scene3DHandle } from './components/Scene3DCanvas';
@@ -50,7 +55,7 @@ import {
   ECOSYSTEM_NARRATIONS,
   EDICION3_NARRATIONS,
 } from './data/narrationScripts';
-import { resolveActiveCue } from './data/presentationChoreography';
+import { resolveActiveCue, resolvePovClimbState } from './data/presentationChoreography';
 import { useSlideNarration } from './hooks/useSlideNarration';
 import { ConurbanoDuelMode } from './three/benchmarkBuilders';
 import { Edicion3DuelMode } from './three/edicion3Builders';
@@ -156,6 +161,7 @@ export default function App() {
   const [ed3Logs, setEd3Logs] = useState<Edicion3AccessLogEntry[]>(() => loadLocalAccessLogs());
   const [ed3LogModalOpen, setEd3LogModalOpen] = useState<boolean>(false);
   const [ed3WordNetworkOpen, setEd3WordNetworkOpen] = useState<boolean>(false);
+  const [ed3ActorAnalysisOpen, setEd3ActorAnalysisOpen] = useState<boolean>(false);
 
   const [highlightedRank, setHighlightedRank] = useState<number | null>(null);
   const [selectedEd3Rank, setSelectedEd3Rank] = useState<number | null>(null);
@@ -169,6 +175,8 @@ export default function App() {
     ratio: number;
     timeSec: number;
   } | null>(null);
+  const [manualPovPlaying, setManualPovPlaying] = useState<boolean>(false);
+  const [manualPovProgress, setManualPovProgress] = useState<number>(0);
 
   // Static export & share modal state
   const [exportOpen, setExportOpen] = useState<boolean>(false);
@@ -328,15 +336,119 @@ export default function App() {
       ? resolveActiveCue(currentSlideKey, narration.progress)
       : null;
 
+  const autoPovClimb =
+    autoPresent && isEdicion3 && !freeOrbitMode && !isExporting && !isEdicion3Locked
+      ? resolvePovClimbState(activeCue, narration.progress)
+      : null;
+
+  const isEd3StairSlide =
+    activeEd3Slide === 1 || activeEd3Slide === 4 || activeEd3Slide === 5;
+
+  const activePovClimb: Edicion3PovClimbState | null = autoPovClimb
+    ? { variant: autoPovClimb.variant, progress: autoPovClimb.progress }
+    : isEdicion3 &&
+        !isEdicion3Locked &&
+        !freeOrbitMode &&
+        !isExporting &&
+        selectedEd3Rank === null &&
+        isEd3StairSlide &&
+        (manualPovPlaying || activeEd3Slide === 5)
+      ? {
+          variant: activeEd3Slide === 1 ? 'podium' : activeEd3Slide === 4 ? 'ranking' : 'pov',
+          progress: manualPovProgress,
+        }
+      : null;
+
+  // Auto-start gentle First-Person POV ascent when opening final Slide 06 manually
+  useEffect(() => {
+    if (
+      isEdicion3 &&
+      !isEdicion3Locked &&
+      activeEd3Slide === 5 &&
+      !autoPresent &&
+      !freeOrbitMode &&
+      !isExporting
+    ) {
+      setManualPovProgress(0);
+      setManualPovPlaying(true);
+    } else {
+      setManualPovPlaying(false);
+      setManualPovProgress(0);
+    }
+  }, [activeReport, activeEd3Slide, autoPresent, freeOrbitMode, isEdicion3, isEdicion3Locked, isExporting]);
+
+  // Smooth slow POV climb loop (~42s full #13 -> #1 ascent)
+  useEffect(() => {
+    if (
+      !manualPovPlaying ||
+      autoPresent ||
+      freeOrbitMode ||
+      isExporting ||
+      isEdicion3Locked ||
+      !isEdicion3 ||
+      selectedEd3Rank !== null
+    ) {
+      return;
+    }
+
+    let rafId = 0;
+    let lastTs = performance.now();
+    const durationSec = 42;
+
+    const step = (now: number) => {
+      const dt = Math.min(0.1, (now - lastTs) / 1000);
+      lastTs = now;
+      let shouldContinue = true;
+      setManualPovProgress((prev) => {
+        const next = Math.min(1, prev + dt / durationSec);
+        if (next >= 1) shouldContinue = false;
+        return next;
+      });
+      if (shouldContinue) {
+        rafId = window.requestAnimationFrame(step);
+      } else {
+        setManualPovPlaying(false);
+      }
+    };
+
+    rafId = window.requestAnimationFrame(step);
+    return () => window.cancelAnimationFrame(rafId);
+  }, [
+    autoPresent,
+    freeOrbitMode,
+    isEdicion3,
+    isEdicion3Locked,
+    isExporting,
+    manualPovPlaying,
+    selectedEd3Rank,
+  ]);
+
+  useEffect(() => {
+    if (autoPovClimb) {
+      setHighlightedRank(autoPovClimb.activeRank);
+    }
+  }, [autoPovClimb]);
+
+  useEffect(() => {
+    if (!autoPovClimb && activePovClimb) {
+      const rank = Math.max(1, Math.min(13, Math.round(13 - activePovClimb.progress * 12)));
+      setHighlightedRank(rank);
+    }
+  }, [activePovClimb, autoPovClimb]);
+
   useEffect(() => {
     if (!activeCue) return;
-    if (activeCue.highlightRank !== undefined) {
+    if (activeCue.highlightRank !== undefined && !autoPovClimb) {
       setHighlightedRank(activeCue.highlightRank ?? null);
     }
     if (activeCue.duelMode) {
-      setDuelMode(activeCue.duelMode);
+      if (isEdicion3) {
+        setEd3DuelMode(activeCue.duelMode);
+      } else {
+        setDuelMode(activeCue.duelMode);
+      }
     }
-  }, [activeCue]);
+  }, [activeCue, autoPovClimb, isEdicion3]);
 
   useEffect(() => () => clearAutoAdvanceTimer(), [clearAutoAdvanceTimer]);
 
@@ -424,13 +536,50 @@ export default function App() {
       setEd3SignalOrigin(null);
       setFreeOrbitMode(false);
       setAutoPresent(false);
+      setManualPovPlaying(false);
+      setManualPovProgress(0);
       setPresentationCompleted(false);
       setEd3WordNetworkOpen(false);
+      setEd3ActorAnalysisOpen(false);
       setEd3LogModalOpen(false);
       setResetCameraNonce((n) => n + 1);
     },
     [clearAutoAdvanceTimer, narration]
   );
+
+  const handleToggleEd3Pov = useCallback(() => {
+    narration.unlockAudio();
+    if (autoPresent && autoPovClimb) {
+      if (narration.isSpeaking) {
+        narration.pause();
+      } else if (narration.isPaused) {
+        void narration.resume();
+      }
+      return;
+    }
+    setFreeOrbitMode(false);
+    setSelectedEd3Rank(null);
+    setEd3SignalOrigin(null);
+    setAutoPresent(false);
+    setManualPovPlaying((prev) => {
+      if (!prev && manualPovProgress >= 0.995) {
+        setManualPovProgress(0);
+      }
+      return !prev;
+    });
+  }, [autoPovClimb, autoPresent, manualPovProgress, narration]);
+
+  const handleSeekEd3Pov = useCallback((progress: number) => {
+    const clamped = Math.max(0, Math.min(1, progress));
+    setFreeOrbitMode(false);
+    setSelectedEd3Rank(null);
+    setEd3SignalOrigin(null);
+    setAutoPresent(false);
+    setManualPovPlaying(false);
+    setManualPovProgress(clamped);
+    const rank = Math.max(1, Math.min(13, Math.round(13 - clamped * 12)));
+    setHighlightedRank(rank);
+  }, []);
 
   const toggleAutoPresentation = useCallback(() => {
     narration.unlockAudio();
@@ -594,6 +743,8 @@ export default function App() {
     clearAutoAdvanceTimer();
     setFreeOrbitMode(false);
     setAutoPresent(false);
+    setManualPovPlaying(false);
+    setManualPovProgress(0);
     setSelectedEd3Rank(null);
     setEd3SignalOrigin(null);
     setHighlightedRank(null);
@@ -877,6 +1028,7 @@ export default function App() {
                 autoPresent={autoPresent}
                 hudCollapsed={hudCollapsed}
                 directorCamera={activeCue?.camera ?? null}
+                povClimb={activePovClimb}
                 onHoverRank={setHighlightedRank}
                 onSelectRank={handleSelectEd3Rank}
               />
@@ -890,6 +1042,13 @@ export default function App() {
                 onSelectRank={handleSelectEd3Rank}
                 hudCollapsed={hudCollapsed}
                 accessLogCount={ed3Logs.length}
+                isPovPlaying={autoPovClimb ? narration.isSpeaking : manualPovPlaying}
+                povProgress={
+                  activePovClimb?.progress ?? (activeEd3Slide === 5 ? manualPovProgress : null)
+                }
+                onTogglePov={handleToggleEd3Pov}
+                onSeekPov={handleSeekEd3Pov}
+                onOpenActorAnalysis={() => setEd3ActorAnalysisOpen(true)}
                 onOpenWordNetwork={() => setEd3WordNetworkOpen(true)}
                 onOpenAccessLogs={() => {
                   void refreshEd3Logs();
@@ -1196,7 +1355,7 @@ export default function App() {
             onClick={jumpToFinalSummary}
             title={
               isEdicion3
-                ? 'Ir a la lámina final con el Ranking Consolidado (13 Autoridades)'
+                ? 'Ir a la lámina final con el Video POV 1ª Persona (#13 → #1)'
                 : 'Ir a la diapositiva final con el Resumen de Ambos Reportes'
             }
             aria-label="Resumen Final"
@@ -1851,6 +2010,20 @@ export default function App() {
       <Edicion3WordCloudNetwork
         isOpen={ed3WordNetworkOpen}
         onClose={() => setEd3WordNetworkOpen(false)}
+      />
+
+      {/* Edición N° 3 Actor Sentiment × Engagement Heatmap Panel */}
+      <Edicion3ActorAnalysisPanel
+        isOpen={ed3ActorAnalysisOpen}
+        initialRank={selectedEd3Rank ?? highlightedRank}
+        onClose={() => setEd3ActorAnalysisOpen(false)}
+        onFocusAuthorityIn3D={(rank) => {
+          setEd3ActorAnalysisOpen(false);
+          if (activeEd3Slide !== 1 && activeEd3Slide !== 4) {
+            setActiveEd3Slide(1);
+          }
+          handleSelectEd3Rank(rank);
+        }}
       />
 
       {/* Edición N° 3 Access Audit Log Modal */}
